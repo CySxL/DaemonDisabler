@@ -1,5 +1,10 @@
 #include "ddRootListController.h"
 #import "../NSTask.h"
+#import <roothide.h>
+
+@interface SRSwitchTableCell ()
+@property (nonatomic, assign) BOOL longPressAttached;
+@end
 
 @implementation SRSwitchTableCell
 
@@ -9,6 +14,58 @@
         [((UISwitch *)[self control]) setOnTintColor:[UIColor colorWithRed:0.9 green:0.1 blue:0.1 alpha:1.0]];
     }
     return self;
+}
+
+-(void)layoutSubviews {
+    [super layoutSubviews];
+    if (!self.longPressAttached) {
+        UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
+        [self.contentView addGestureRecognizer:longPress];
+        self.longPressAttached = YES;
+    }
+}
+
+-(void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+
+    UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [gen impactOccurred];
+
+    NSString *fullPath = [self.specifier propertyForKey:@"key"];
+    if (!fullPath) return;
+
+    NSString *fileName = [fullPath lastPathComponent];
+    NSString *label = [fileName stringByDeletingPathExtension];
+
+    UIViewController *vc = nil;
+    UIResponder *responder = self;
+    while ((responder = [responder nextResponder])) {
+        if ([responder isKindOfClass:[UIViewController class]]) {
+            vc = (UIViewController *)responder;
+            break;
+        }
+    }
+    if (!vc) return;
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:fileName message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Copy Label" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action){
+        [UIPasteboard generalPasteboard].string = label;
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Copy Full Path" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action){
+        [UIPasteboard generalPasteboard].string = fullPath;
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+
+    sheet.popoverPresentationController.sourceView = self.contentView;
+    sheet.popoverPresentationController.sourceRect = self.contentView.bounds;
+
+    if (vc.presentedViewController) {
+        [vc dismissViewControllerAnimated:NO completion:^{
+            [vc presentViewController:sheet animated:YES completion:nil];
+        }];
+    } else {
+        [vc presentViewController:sheet animated:YES completion:nil];
+    }
 }
 
 @end
@@ -34,16 +91,39 @@
 }
 
 -(id)readPreferenceValue:(PSSpecifier *)specifier{
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.level3tjg.daemondisabler.plist"];
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:[NSString stringWithUTF8String:jbroot("/var/mobile/Library/Preferences/com.level3tjg.daemondisabler.plist")]];
     if (!prefs[specifier.properties[@"key"]]){
         return @YES;
     }
     return prefs[specifier.properties[@"key"]];
 }
 
--(void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier{
+-(void)confirmAction:(NSString *)actionVerb wrapperAction:(NSString *)wrapperAction service:(NSString *)service daemon:(NSString *)daemon value:(id)value specifier:(PSSpecifier *)specifier{
     NSMutableDictionary *defaults = [NSMutableDictionary dictionary];
-    [defaults addEntriesFromDictionary:[NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.level3tjg.daemondisabler.plist"]];
+    [defaults addEntriesFromDictionary:[NSDictionary dictionaryWithContentsOfFile:[NSString stringWithUTF8String:jbroot("/var/mobile/Library/Preferences/com.level3tjg.daemondisabler.plist")]]];
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"DaemonDisabler" message:[NSString stringWithFormat:@"Are you sure you want to %@ %@?", actionVerb, daemon] preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"Yes" style:UIAlertActionStyleDefault handler:^(UIAlertAction * action){
+        NSTask *task = [NSTask new];
+        [task setLaunchPath:[NSString stringWithUTF8String:jbroot("/usr/libexec/launchctl_wrapper")]];
+        if ([wrapperAction isEqualToString:@"enable"]) {
+            [task setArguments:@[wrapperAction, service, daemon]];
+        } else {
+            [task setArguments:@[wrapperAction, service]];
+        }
+        [task launch];
+        [defaults setObject:value forKey:specifier.properties[@"key"]];
+        [defaults writeToFile:[NSString stringWithUTF8String:jbroot("/var/mobile/Library/Preferences/com.level3tjg.daemondisabler.plist")] atomically:YES];
+    }];
+    UIAlertAction *otherAction = [UIAlertAction actionWithTitle:@"No" style:UIAlertActionStyleDefault handler:^(UIAlertAction * action){
+        [self reloadSpecifier:specifier];
+    }];
+    [alert addAction:okAction];
+    [alert addAction:otherAction];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+-(void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier{
     NSString *daemon = specifier.properties[@"key"];
     NSDictionary *daemonPlist = [NSDictionary dictionaryWithContentsOfFile:daemon];
     NSString *service = [daemonPlist objectForKey:@"Label"];
@@ -52,44 +132,10 @@
         service = components[[components count]-2];
     }
     if([value isEqual:@NO]){
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"DaemonDisabler" message:[NSString stringWithFormat:@"Are you sure you want to disable %@?", daemon] preferredStyle:UIAlertControllerStyleAlert];
-        UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"Yes" style:UIAlertActionStyleDefault handler:^(UIAlertAction * action){
-
-            NSTask *task = [NSTask new];
-            [task setLaunchPath:@"/usr/libexec/launchctl_wrapper"];
-            [task setArguments:@[@"unload", daemon]];
-            [task launch];
-            [defaults setObject:value forKey:specifier.properties[@"key"]];
-            [defaults writeToFile:@"/var/mobile/Library/Preferences/com.level3tjg.daemondisabler.plist" atomically:YES];
-        }];
-        UIAlertAction *otherAction = [UIAlertAction actionWithTitle:@"No" style:UIAlertActionStyleDefault handler:^(UIAlertAction * action){
-            [(UISwitch *)specifier.properties[@"control"] setOn:TRUE animated:TRUE];
-            [alert dismissViewControllerAnimated:YES completion:nil];
-        }];
-        [alert addAction:okAction];
-        [alert addAction:otherAction];
-        [self presentViewController:alert animated:YES completion:nil];
+        [self confirmAction:@"disable" wrapperAction:@"disable" service:service daemon:daemon value:value specifier:specifier];
     }
     else{
-        NSTask *task = [NSTask new];
-        [task setLaunchPath:@"/usr/libexec/launchctl_wrapper"];
-        [task setArguments:@[@"load", daemon]];
-        [task launch];
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"DaemonDisabler" message:[NSString stringWithFormat:@"Would you like to kickstart %@?", service] preferredStyle:UIAlertControllerStyleAlert];
-        UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"Yes" style:UIAlertActionStyleDefault handler:^(UIAlertAction * action){
-            NSTask *task = [NSTask new];
-            [task setLaunchPath:@"/usr/libexec/launchctl_wrapper"];
-            [task setArguments:@[@"kickstart", @"-k", [NSString stringWithFormat:@"system/%@", service]]];
-            [task launch];
-        }];
-        UIAlertAction *otherAction = [UIAlertAction actionWithTitle:@"No" style:UIAlertActionStyleDefault handler:^(UIAlertAction * action){
-            [alert dismissViewControllerAnimated:YES completion:nil];
-        }];
-        [alert addAction:okAction];
-        [alert addAction:otherAction];
-        [self presentViewController:alert animated:YES completion:nil];
-        [defaults setObject:value forKey:specifier.properties[@"key"]];
-        [defaults writeToFile:@"/var/mobile/Library/Preferences/com.level3tjg.daemondisabler.plist" atomically:YES];
+        [self confirmAction:@"enable" wrapperAction:@"enable" service:service daemon:daemon value:value specifier:specifier];
     }
 }
 
@@ -111,7 +157,7 @@
             if([label.text isEqualToString:@"DaemonDisabler"])
                 label.hidden = true;
     [bar setTintColor:[UIColor colorWithRed:0.9 green:0.1 blue:0.1 alpha:1.0]];
-    UIImageView *imageView = [[UIImageView alloc] initWithImage:[UIImage imageWithContentsOfFile:@"/Library/PreferenceBundles/DaemonDisablerPrefs.bundle/Icon@3x.png"]];
+    UIImageView *imageView = [[UIImageView alloc] initWithImage:[UIImage imageWithContentsOfFile:[NSString stringWithUTF8String:jbroot("/Library/PreferenceBundles/DaemonDisablerPrefs.bundle/Icon@3x.png")]]];
     CGSize imageSize = CGSizeMake(40, 40);
     CGFloat marginX = (self.navigationController.navigationBar.frame.size.width / 2) - (imageSize.width / 2);
     imageView.frame = CGRectMake(marginX, 0, imageSize.width, imageSize.height);
